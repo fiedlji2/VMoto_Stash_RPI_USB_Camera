@@ -49,6 +49,7 @@ Uninstall: `sudo ./uninstall.sh`.
   and **under-voltage** warning, recent log
 - Camera: mirror, digital zoom + pan, bitrate (quality), WDR, brightness, contrast, saturation, gamma, sharpness,
   white balance, exposure, anti-flicker – all **live**; *Save* writes `camera.conf` / `view.json`
+- **EN / CS** language switch (English by default, remembered in the browser)
 - JSON API: `/api/status`, `/api/camera`, `/api/view` (see `web.py`)
 
 ## How it works
@@ -96,6 +97,7 @@ sudo reboot
 Pak zapojit USB kameru, displej motorky přepnout do režimu pro připojení mobilu a zapnout Pi.
 Nastavení na **http://192.168.1.10/** (PC na ethernetu např. `192.168.1.20 / 255.255.255.0`):
 zrcadlení, zoom, datový tok, WDR, jas, kontrast… – změny se projeví hned, tlačítko *Uložit* je zachová.
+Stránka je anglicky, přepínačem **CS** vpravo nahoře se přepne do češtiny (prohlížeč si volbu pamatuje).
 
 Pi se připojí k jakémukoli displeji Carbit v dosahu (nejsilnější signál). Pevný displej:
 `DASH_MAC=xx:xx:xx:xx:xx:xx` v `systemctl edit vmoto-auto`. Podrobnosti protokolu: [docs/PROTOCOL.md](docs/PROTOCOL.md).

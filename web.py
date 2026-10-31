@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Stavová stránka Pi pro ethernet (port 80). Jen standardní knihovna.
+"""Status & settings page for the Pi on Ethernet (port 80). Standard library only.
 
-  /                    HTML stránka, obnovuje se sama
-  /api/status          stav jako JSON (zdroj pro stránku, dá se číst i skriptem)
-  /api/camera          GET: ovládání USB kamery (rozsahy, aktuální a uložené hodnoty)
-                       POST {"name": hodnota, ...}: nastaví hned (naživo na displeji)
-  /api/camera/save     POST: uloží aktuální hodnoty do camera.conf a výřez do view.json
-                       (logger je použije při každém startu kamery)
-  /api/camera/defaults POST: výchozí hodnoty kamery a výřezu (naživo, bez uložení)
-  /api/camera/revert   POST: vrátí uložené hodnoty (naživo)
+  /                    HTML page, refreshes itself
+  /api/status          status as JSON (used by the page, also usable from scripts)
+  /api/camera          GET: USB camera controls (ranges, current and saved values)
+                       POST {"name": value, ...}: applies immediately (live on the dash)
+  /api/camera/save     POST: saves current values to camera.conf and the view to view.json
+                       (logger.py applies them every time the camera starts)
+  /api/camera/defaults POST: camera and view defaults (live, not saved)
+  /api/camera/revert   POST: restores the saved values (live)
   /api/view            POST {"zoom": 1-2, "pan_x": -1..1, "pan_y": -1..1, "mirror": true/false,
-                       "bitrate_mbps": 2-25}: zoom, posun výřezu, zrcadlení a datový tok naživo
+                       "bitrate_mbps": 2-25}: zoom, pan, mirror and bitrate, live
+
+Note: logger.py and vmoto-auto.sh write their log (/var/log/vmoto-auto.log) in Czech;
+the regular expressions below match those Czech log lines.
 """
 import glob
 import json
@@ -25,17 +28,17 @@ PORT = int(os.environ.get("WEB_PORT", "80"))
 LOG = "/var/log/vmoto-auto.log"
 DIR = os.environ.get("VMOTO_DIR", os.path.dirname(os.path.abspath(__file__)))
 CAMERA_CONF = f"{DIR}/camera.conf"
-VIEW_SAVED = f"{DIR}/view.json"            # digitální zoom/posun, uložené (Uložit)
-# živé změny, logger je hned promítne; /run/vmoto vytváří služba (RuntimeDirectory), /dev/shm nejde:
-# systemd (RemoveIPC) tam maže soubory uživatele pi po odhlášení poslední relace
+VIEW_SAVED = f"{DIR}/view.json"            # digital zoom/pan/mirror/bitrate, saved (Save button)
+# live changes, logger.py applies them immediately; /run/vmoto is created by the service (RuntimeDirectory).
+# Not /dev/shm: systemd (RemoveIPC) deletes a user's files there when their last session logs out.
 VIEW_LIVE = "/run/vmoto/view-live.json"
-VIEW_DEFAULT = {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0, "mirror": True,   # kamera jako zpětné zrcátko
+VIEW_DEFAULT = {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0, "mirror": True,   # camera used as a rear-view mirror
                 "bitrate_mbps": 12.0}
-# ovládání kamery, které stránka nabízí (pořadí = pořadí na stránce)
+# camera controls offered on the page (order = order on the page)
 CAMERA_CTRLS = ["backlight_compensation", "brightness", "contrast", "saturation", "gamma", "sharpness", "hue",
                 "white_balance_automatic", "white_balance_temperature", "auto_exposure",
                 "exposure_time_absolute", "power_line_frequency"]
-# opakující se řádky, které do přehledu logu nepatří
+# repetitive log lines that don't belong in the log overview
 NOISE = re.compile(r"HEARTBEAT|heartbeat|REQ_RV_DATA_NEXT|kamera 10s|\[54321|^\s*$")
 
 
@@ -62,7 +65,7 @@ def camera_dev():
 
 
 def camera_ctrls(dev: str) -> list:
-    """Rozparsuje `v4l2-ctl --list-ctrls-menus` na seznam ovládacích prvků."""
+    """Parses `v4l2-ctl --list-ctrls-menus` into a list of controls."""
     out, ctrls = sh("v4l2-ctl", "-d", dev, "--list-ctrls-menus"), {}
     cur = None
     for line in out.splitlines():
@@ -102,8 +105,8 @@ def set_ctrls(dev: str, values: dict) -> str:
             val = max(c["min"], min(c["max"], val))
         parts.append(f"{name}={val}")
     if not parts:
-        return "nic k nastavení"
-    # automatika expozice/vyvážení bílé musí jít první, jinak se ruční hodnota nenastaví
+        return "nothing_to_set"
+    # auto exposure / auto white balance must go first, otherwise a manual value is rejected
     parts.sort(key=lambda p: 0 if p.startswith(("auto_exposure", "white_balance_automatic")) else 1)
     r = subprocess.run(["v4l2-ctl", "-d", dev, "-c", ",".join(parts)], capture_output=True, text=True, timeout=3)
     return r.stderr.strip() or "OK"
@@ -137,7 +140,7 @@ _tx = {"t": 0.0, "bytes": 0, "mbps": None}
 
 
 def tx_rate():
-    """Skutečný datový tok do displeje (bajty odeslané na Wi-Fi Direct rozhraní mezi dotazy)."""
+    """Actual bitrate to the dash (bytes sent on the Wi-Fi Direct interface between requests)."""
     ifs = glob.glob("/sys/class/net/p2p-wlan0-*/statistics/tx_bytes")
     if not ifs:
         _tx.update(t=0.0, mbps=None)
@@ -168,28 +171,29 @@ def last(lines: list, pattern: str):
 
 def status() -> dict:
     lines = tail(LOG)
-    # řádky o připojení bývají daleko zpátky (přenos loguje každých 10 s), proto větší kus logu
+    # connection lines can be far back (streaming logs every 10 s), hence a bigger chunk of the log
     big = tail(LOG, 100_000, 3_000_000)
     auto = [l for l in big if "[auto]" in l]
-    state = "neznámý"
+    # state is a language-neutral key, the page translates it (EN/CS)
+    state = "unknown"
     if auto:
         a = auto[-1]
         if "připojeno na" in a or "displej na" in a:
-            state = "připojeno k displeji"
+            state = "connected"
         elif "hledám" in a or "relace ukončena" in a:
-            state = "hledá displej"
+            state = "searching"
         elif "nepovedlo" in a:
-            state = "připojení selhalo, zkouší znovu"
+            state = "failed"
         elif "konec služby" in a:
-            state = "služba zastavena"
+            state = "stopped"
     if os.path.exists(f"{DIR}/DISABLE"):
-        state = "pozastaveno (DISABLE)"
+        state = "paused"
 
     dash = last(auto, r"displej (\S+) \(([0-9a-f:]{17})\), signál (-?\d+) dBm, kanál (\S+) MHz")
     cam = last(lines, r"kamera 10s: žádostí ([\d.]+)/s, odesláno celkem (\d+), z kamery (\d+), zahozeno (\d+), "
                       r"prázdných (\d+), fronta (\d+)(?:, stáří snímku průměr (\d+) ms, max (\d+) ms)?")
     cam_src = last(big, r"\[camera\] (USB .*|SBS .*|picamera2 .*)")
-    # restarty kamery jen v aktuální relaci (od posledního připojení k displeji)
+    # camera restarts in the current session only (since the last connection to the dash)
     since = max((i for i, l in enumerate(big) if "připojeno na" in l), default=0)
     restarts = sum(1 for l in big[since:] if "[camera] restart" in l)
 
@@ -223,14 +227,18 @@ def status() -> dict:
 
 
 PAGE = """<!doctype html>
-<html lang="cs"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Vmoto Pi</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#6b7385;--ok:#1a8f4c;--bad:#c0392b;--line:#e3e6ec}
 @media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--fg:#e6e9ef;--mut:#98a0b0;--line:#2c313a}}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif}
 main{max-width:980px;margin:0 auto;padding:16px}
-h1{font-size:20px;margin:4px 0 12px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 12px}
+h1{font-size:20px;margin:0}
+.lang{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lang button{border:0;border-radius:0;padding:4px 12px;background:var(--card)}
+.lang button.on{background:var(--ok);color:#fff}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:0 0 8px}
@@ -246,63 +254,103 @@ button{font:inherit;padding:6px 14px;border-radius:8px;border:1px solid var(--li
 button.primary{background:var(--ok);border-color:var(--ok);color:#fff}
 @media (max-width:520px){.ctl{grid-template-columns:110px 1fr 44px}}
 </style></head><body><main>
-<h1>Vmoto Pi – stav</h1>
+<header><h1 data-t="title"></h1>
+ <div class="lang"><button id="l_en" type="button">EN</button><button id="l_cs" type="button">CS</button></div></header>
 <div class="grid">
- <div class="card"><h2>Stav</h2><div id="state" class="big">…</div><div id="svc" class="mut"></div></div>
- <div class="card"><h2>Displej</h2><dl id="dash"></dl></div>
- <div class="card"><h2>Přenos</h2><dl id="stream"></dl></div>
+ <div class="card"><h2 data-t="h_status"></h2><div id="state" class="big">…</div><div id="svc" class="mut"></div></div>
+ <div class="card"><h2 data-t="h_dash"></h2><dl id="dash"></dl></div>
+ <div class="card"><h2 data-t="h_stream"></h2><dl id="stream"></dl></div>
  <div class="card"><h2>Pi</h2><dl id="pi"></dl></div>
 </div>
-<div class="card" id="cam"><h2>Kamera – změny se projeví hned na displeji</h2>
+<div class="card" id="cam"><h2 data-t="h_camera"></h2>
  <div id="view"></div>
- <div id="ctls" class="mut">načítám…</div>
- <div class="btns"><button class="primary" id="save">Uložit</button><button id="defs">Výchozí hodnoty</button>
-  <button id="revert">Vrátit uložené</button><span id="cammsg" class="mut"></span></div>
+ <div id="ctls" class="mut" data-t="loading"></div>
+ <div class="btns"><button class="primary" id="save" data-t="b_save"></button><button id="defs" data-t="b_defs"></button>
+  <button id="revert" data-t="b_revert"></button><span id="cammsg" class="mut"></span></div>
 </div>
 <pre id="log"></pre>
 <p class="mut" id="ts"></p>
 </main><script>
+const I18N={
+ en:{title:'Vmoto Pi – status',h_status:'Status',h_dash:'Dash',h_stream:'Stream',h_camera:'Camera – changes apply live on the dash',
+  loading:'loading…',b_save:'Save',b_defs:'Defaults',b_revert:'Restore saved',
+  st_connected:'connected to dash',st_searching:'searching for dash',st_failed:'connection failed, retrying',
+  st_stopped:'service stopped',st_paused:'paused (DISABLE)',st_unknown:'unknown',svc:'vmoto-auto service',
+  name:'name',signal:'signal',channel:'channel',not_found:'not found yet',
+  polls:'dash requests',fps:'frames/s',bitrate:'bitrate',kbframe:'kB/frame',sent:'sent',dropped:'dropped',
+  age:'frame age',camera:'camera',restarts:'camera restarts',no_data:'no data yet',
+  temp:'temperature',load:'load',uv:'under-voltage',yes_caps:'YES',since_boot:'since boot',no:'no',yes:'yes',uptime:'uptime',
+  updated:'updated',no_resp:'Pi not responding',saved:'saved',unsaved:'unsaved changes',error:'error',
+  mirror:'Mirror (rear-view)',br:'Bitrate (quality)',zoom:'Digital zoom',pan_x:'Pan horizontal',pan_y:'Pan vertical',
+  no_camera:'USB camera not connected',invalid_json:'invalid JSON',nothing_to_set:'nothing to set',
+  saved_note:'saved – applied every time the camera starts',
+  c_backlight_compensation:'WDR (backlight)',c_brightness:'Brightness',c_contrast:'Contrast',c_saturation:'Saturation',
+  c_gamma:'Gamma',c_sharpness:'Sharpness',c_hue:'Hue',c_white_balance_automatic:'Auto white balance',
+  c_white_balance_temperature:'White balance (K)',c_auto_exposure:'Exposure',c_exposure_time_absolute:'Exposure time (0.1 ms)',
+  c_power_line_frequency:'Anti-flicker'},
+ cs:{title:'Vmoto Pi – stav',h_status:'Stav',h_dash:'Displej',h_stream:'Přenos',h_camera:'Kamera – změny se projeví hned na displeji',
+  loading:'načítám…',b_save:'Uložit',b_defs:'Výchozí hodnoty',b_revert:'Vrátit uložené',
+  st_connected:'připojeno k displeji',st_searching:'hledá displej',st_failed:'připojení selhalo, zkouší znovu',
+  st_stopped:'služba zastavena',st_paused:'pozastaveno (DISABLE)',st_unknown:'neznámý',svc:'služba vmoto-auto',
+  name:'název',signal:'signál',channel:'kanál',not_found:'zatím nenalezen',
+  polls:'displej bere',fps:'snímků/s',bitrate:'datový tok',kbframe:'kB/snímek',sent:'odesláno',dropped:'zahozeno',
+  age:'stáří snímku',camera:'kamera',restarts:'restarty kamery',no_data:'zatím bez dat',
+  temp:'teplota',load:'zátěž',uv:'podpětí',yes_caps:'ANO',since_boot:'od startu ano',no:'ne',yes:'ano',uptime:'běží',
+  updated:'aktualizováno',no_resp:'Pi neodpovídá',saved:'uloženo',unsaved:'neuložené změny',error:'chyba',
+  mirror:'Zrcadlit (zpětné zrcátko)',br:'Datový tok (kvalita)',zoom:'Digitální zoom',pan_x:'Výřez vodorovně',pan_y:'Výřez svisle',
+  no_camera:'USB kamera není připojená',invalid_json:'neplatný JSON',nothing_to_set:'nic k nastavení',
+  saved_note:'uloženo – použije se při každém spuštění kamery',
+  c_backlight_compensation:'WDR (protisvětlo)',c_brightness:'Jas',c_contrast:'Kontrast',c_saturation:'Sytost',
+  c_gamma:'Gamma',c_sharpness:'Ostrost',c_hue:'Odstín',c_white_balance_automatic:'Auto vyvážení bílé',
+  c_white_balance_temperature:'Teplota bílé (K)',c_auto_exposure:'Expozice',c_exposure_time_absolute:'Doba expozice (0,1 ms)',
+  c_power_line_frequency:'Proti blikání světel'}};
+let lang='en';
+try{const s=localStorage.getItem('vmoto_lang');if(s==='cs'||s==='en')lang=s}catch(e){}
+const T=k=>(I18N[lang][k]??I18N.en[k]??k);
+const tm=m=>m&&m!=='OK'?T(m):'';   // server messages are keys; unknown text (v4l2-ctl errors) passes through
+function setLang(l){
+ lang=l;try{localStorage.setItem('vmoto_lang',l)}catch(e){}
+ document.documentElement.lang=l;
+ document.getElementById('l_en').className=l==='en'?'on':'';document.getElementById('l_cs').className=l==='cs'?'on':'';
+ document.querySelectorAll('[data-t]').forEach(e=>e.textContent=T(e.dataset.t));
+ if(cam)renderCam(cam);tick();
+}
 const dl=(el,rows)=>{document.getElementById(el).innerHTML=rows.map(([k,v])=>`<dt>${k}</dt><dd>${v??'–'}</dd>`).join('')};
 async function tick(){
  try{
   const s=await (await fetch('/api/status',{cache:'no-store'})).json();
-  const st=document.getElementById('state');st.textContent=s.state;
-  st.className='big '+(s.state.startsWith('připojeno')?'ok':s.state.startsWith('hledá')?'':'bad');
-  document.getElementById('svc').textContent='služba vmoto-auto: '+s.service;
-  dl('dash',s.dash?[['název',s.dash.name],['MAC',s.dash.mac],['signál',s.dash.signal_dbm+' dBm'],['kanál',s.dash.freq_mhz+' MHz']]:[['','zatím nenalezen']]);
-  const t=s.stream;dl('stream',t?[['displej bere',t.polls_per_s+' snímků/s'],
-   ['datový tok',s.tx_mbps!=null?s.tx_mbps+' Mbit/s'+(t.polls_per_s?' (~'+Math.round(s.tx_mbps*1000/8/t.polls_per_s)+' kB/snímek)':''):null],
-   ['odesláno',t.sent],['zahozeno',t.dropped],
-   ['stáří snímku',t.age_avg_ms!=null?t.age_avg_ms+' ms (max '+t.age_max_ms+')':null],['kamera',s.camera.source],
-   ['restarty kamery',s.camera.restarts_in_log]]:[['','zatím bez dat']]);
-  const p=s.pi;dl('pi',[['teplota',p.temp],['zátěž',p.load.join(' / ')],['podpětí',p.undervoltage_now?'<span class=bad>ANO</span>':
-   (p.undervoltage_since_boot?'<span class=bad>od startu ano</span>':'<span class=ok>ne</span>')],['běží',p.uptime_min+' min']]);
+  const st=document.getElementById('state');st.textContent=T('st_'+s.state);
+  st.className='big '+(s.state==='connected'?'ok':s.state==='searching'?'':'bad');
+  document.getElementById('svc').textContent=T('svc')+': '+s.service;
+  dl('dash',s.dash?[[T('name'),s.dash.name],['MAC',s.dash.mac],[T('signal'),s.dash.signal_dbm+' dBm'],[T('channel'),s.dash.freq_mhz+' MHz']]:[['',T('not_found')]]);
+  const t=s.stream;dl('stream',t?[[T('polls'),t.polls_per_s+' '+T('fps')],
+   [T('bitrate'),s.tx_mbps!=null?s.tx_mbps+' Mbit/s'+(t.polls_per_s?' (~'+Math.round(s.tx_mbps*1000/8/t.polls_per_s)+' '+T('kbframe')+')':''):null],
+   [T('sent'),t.sent],[T('dropped'),t.dropped],
+   [T('age'),t.age_avg_ms!=null?t.age_avg_ms+' ms (max '+t.age_max_ms+')':null],[T('camera'),s.camera.source],
+   [T('restarts'),s.camera.restarts_in_log]]:[['',T('no_data')]]);
+  const p=s.pi;dl('pi',[[T('temp'),p.temp],[T('load'),p.load.join(' / ')],[T('uv'),p.undervoltage_now?'<span class=bad>'+T('yes_caps')+'</span>':
+   (p.undervoltage_since_boot?'<span class=bad>'+T('since_boot')+'</span>':'<span class=ok>'+T('no')+'</span>')],[T('uptime'),p.uptime_min+' min']]);
   document.getElementById('log').textContent=s.log.join('\\n');
-  document.getElementById('ts').textContent='aktualizováno '+s.time;
- }catch(e){document.getElementById('ts').textContent='Pi neodpovídá: '+e}
+  document.getElementById('ts').textContent=T('updated')+' '+s.time;
+ }catch(e){document.getElementById('ts').textContent=T('no_resp')+': '+e}
 }
-tick();setInterval(tick,2000);
-
-const NAMES={backlight_compensation:'WDR (protisvětlo)',brightness:'Jas',contrast:'Kontrast',saturation:'Sytost',
- gamma:'Gamma',sharpness:'Ostrost',hue:'Odstín',white_balance_automatic:'Auto vyvážení bílé',
- white_balance_temperature:'Teplota bílé (K)',auto_exposure:'Expozice',exposure_time_absolute:'Doba expozice (0,1 ms)',
- power_line_frequency:'Proti blikání světel'};
 let cam=null,timers={};
 const msg=t=>document.getElementById('cammsg').textContent=t;
+const camMsg=d=>msg((tm(d.msg)?tm(d.msg)+' · ':'')+(dirty()?T('unsaved'):T('saved')));
 function dirty(){if(!cam)return false;if(!Object.keys(cam.saved).length)return true;
  const v=cam.view,s=v.saved;
  if(!s||v.live.mirror!==s.mirror||['zoom','pan_x','pan_y','bitrate_mbps'].some(k=>Math.abs(v.live[k]-s[k])>1e-3))return true;
  return cam.ctrls.some(c=>c.flags.indexOf('inactive')<0&&c.name in cam.saved&&cam.saved[c.name]!==c.value)}
 function renderView(d){
  const v=d.view.live,s=d.view.saved,el=document.getElementById('view');
- const row=(k,lbl,min,max,step,val,fmt)=>`<div class=ctl><label>${lbl}${s?`<div class=saved>uloženo ${fmt(s[k])}</div>`:''}</label>
+ const row=(k,lbl,min,max,step,val,fmt)=>`<div class=ctl><label>${lbl}${s?`<div class=saved>${T('saved')} ${fmt(s[k])}</div>`:''}</label>
   <input type=range data-v="${k}" min=${min} max=${max} step=${step} value=${val}><span class=v id="vv_${k}">${fmt(val)}</span></div>`;
  const pct=x=>Math.round(x*100)+' %';
- el.innerHTML=`<div class=ctl><label>Zrcadlit (zpětné zrcátko)${s?`<div class=saved>uloženo ${s.mirror?'ano':'ne'}</div>`:''}</label>
-  <input type=checkbox id=mirror ${v.mirror?'checked':''}><span class=v>${v.mirror?'ano':'ne'}</span></div>`
-  +row('bitrate_mbps','Datový tok (kvalita)',2,25,0.5,v.bitrate_mbps,x=>(+x).toFixed(1)+' Mb')
-  +row('zoom','Digitální zoom',1,2,0.05,v.zoom,x=>(+x).toFixed(2)+'×')
-  +row('pan_x','Výřez vodorovně',-1,1,0.02,v.pan_x,pct)+row('pan_y','Výřez svisle',-1,1,0.02,v.pan_y,pct);
+ el.innerHTML=`<div class=ctl><label>${T('mirror')}${s?`<div class=saved>${T('saved')} ${s.mirror?T('yes'):T('no')}</div>`:''}</label>
+  <input type=checkbox id=mirror ${v.mirror?'checked':''}><span class=v>${v.mirror?T('yes'):T('no')}</span></div>`
+  +row('bitrate_mbps',T('br'),2,25,0.5,v.bitrate_mbps,x=>(+x).toFixed(1)+' Mb')
+  +row('zoom',T('zoom'),1,2,0.05,v.zoom,x=>(+x).toFixed(2)+'×')
+  +row('pan_x',T('pan_x'),-1,1,0.02,v.pan_x,pct)+row('pan_y',T('pan_y'),-1,1,0.02,v.pan_y,pct);
  document.getElementById('mirror').addEventListener('change',e=>post('/api/view',{mirror:e.target.checked}));
  el.querySelectorAll('[data-v]').forEach(i=>i.addEventListener('input',()=>{
   const k=i.dataset.v,val=+i.value;
@@ -312,11 +360,11 @@ function renderView(d){
 }
 function renderCam(d){
  cam=d;renderView(d);const el=document.getElementById('ctls');
- if(!d.ok){el.textContent=d.msg;return}
+ if(!d.ok){el.textContent=tm(d.msg);return}
  el.className='';
  el.innerHTML=d.ctrls.map(c=>{
-  const off=c.flags.indexOf('inactive')>=0,lbl=NAMES[c.name]||c.name;
-  const sv=(c.name in d.saved)?`<div class=saved>uloženo ${d.saved[c.name]}</div>`:'';
+  const off=c.flags.indexOf('inactive')>=0,lbl=T('c_'+c.name);
+  const sv=(c.name in d.saved)?`<div class=saved>${T('saved')} ${d.saved[c.name]}</div>`:'';
   let inp;
   if(c.type==='bool'||(c.type==='int'&&c.min===0&&c.max===1))
    inp=`<input type=checkbox data-n="${c.name}" ${c.value?'checked':''} ${off?'disabled':''}>`;
@@ -334,17 +382,20 @@ function renderCam(d){
    timers[n]=setTimeout(()=>post('/api/camera',{[n]:v},n==='auto_exposure'||n==='white_balance_automatic'),120);
   });
  });
- msg((d.msg&&d.msg!=='OK'?d.msg+' · ':'')+(dirty()?'neuložené změny':'uloženo'));
+ camMsg(d);
 }
 async function post(url,body,rerender=true){
  try{const d=await (await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})).json();
-  if(rerender)renderCam(d);else{cam=d;msg((d.msg&&d.msg!=='OK'?d.msg+' · ':'')+(dirty()?'neuložené změny':'uloženo'))}}
- catch(e){msg('chyba: '+e)}
+  if(rerender)renderCam(d);else{cam=d;camMsg(d)}}
+ catch(e){msg(T('error')+': '+e)}
 }
 document.getElementById('save').onclick=()=>post('/api/camera/save');
 document.getElementById('defs').onclick=()=>post('/api/camera/defaults');
 document.getElementById('revert').onclick=()=>post('/api/camera/revert');
-fetch('/api/camera',{cache:'no-store'}).then(r=>r.json()).then(renderCam).catch(e=>msg('chyba: '+e));
+document.getElementById('l_en').onclick=()=>setLang('en');
+document.getElementById('l_cs').onclick=()=>setLang('cs');
+setLang(lang);setInterval(tick,2000);
+fetch('/api/camera',{cache:'no-store'}).then(r=>r.json()).then(renderCam).catch(e=>msg(T('error')+': '+e));
 </script></body></html>"""
 
 
@@ -363,7 +414,7 @@ class Handler(BaseHTTPRequestHandler):
     def _camera(self, msg: str = ""):
         dev = camera_dev()
         if not dev:
-            return self._json(200, {"ok": False, "msg": "USB kamera není připojená", "ctrls": [], "saved": {},
+            return self._json(200, {"ok": False, "msg": "no_camera", "ctrls": [], "saved": {},
                                     "view": views()})
         self._json(200, {"ok": True, "msg": msg, "dev": dev, "ctrls": camera_ctrls(dev), "saved": saved_ctrls(),
                          "view": views()})
@@ -383,13 +434,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
         except ValueError:
-            return self._json(400, {"ok": False, "msg": "neplatný JSON"})
+            return self._json(400, {"ok": False, "msg": "invalid_json"})
         if self.path == "/api/view":
             write_view(VIEW_LIVE, {**views()["live"], **body})
             return self._camera("OK")
         dev = camera_dev()
         if not dev:
-            return self._json(200, {"ok": False, "msg": "USB kamera není připojená", "ctrls": [], "saved": {},
+            return self._json(200, {"ok": False, "msg": "no_camera", "ctrls": [], "saved": {},
                                     "view": views()})
         if self.path == "/api/camera":
             self._camera(set_ctrls(dev, body))
@@ -398,7 +449,7 @@ class Handler(BaseHTTPRequestHandler):
             self._camera(set_ctrls(dev, saved_ctrls()) if saved_ctrls() else "OK")
         elif self.path == "/api/camera/defaults":
             write_view(VIEW_LIVE, VIEW_DEFAULT)
-            # ruční expozice/teplota bílé jsou při zapnuté automatice neaktivní -> nenastavovat
+            # manual exposure / white balance are inactive while auto is on -> don't set them
             manual = ("exposure_time_absolute", "white_balance_temperature")
             self._camera(set_ctrls(dev, {c["name"]: c["default"] for c in camera_ctrls(dev)
                                          if "default" in c and c["name"] not in manual}))
@@ -409,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(",".join(f"{k}={v}" for k, v in vals.items()) + "\n")
             os.replace(tmp, CAMERA_CONF)
             write_view(VIEW_SAVED, views()["live"])
-            self._camera("uloženo – použije se při každém spuštění kamery")
+            self._camera("saved_note")
         else:
             self._send(404, b"not found", "text/plain")
 
