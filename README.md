@@ -11,6 +11,11 @@ live H.264 video to it – no phone, no app, no modification of the bike.
 - Mirrored image (rear-view mirror), digital zoom 1–2× with pan, WDR, brightness/contrast/gamma…
 - Status & settings web page over Ethernet, changes apply **live** on the dash, *Save* makes them permanent
 
+> [!WARNING]
+> **Vibe-coded, for testing only.** This project was put together quickly with an AI assistant, tested on one
+> bike and one camera. It may contain bugs, it is not a finished product and it comes with no warranty.
+> Use it for experiments and demos, not as safety equipment on the road.
+
 > **Česky:** viz [níže](#česky).
 
 ## Hardware
@@ -81,6 +86,11 @@ GPL-3.0 – see [LICENSE](LICENSE).
 ---
 
 ## Česky
+
+> [!WARNING]
+> **Vibecoded projekt, jen pro testovací účely.** Vzniklo rychle s pomocí AI asistenta a vyzkoušené je jen
+> na jedné motorce a jedné kameře. Může obsahovat chyby, není to hotový produkt a není na to žádná záruka.
+> Je to na zkoušení a předvádění, ne jako bezpečnostní výbava do provozu.
 
 Raspberry Pi s USB kamerou jako bezdrátová zpětná kamera pro motorky s displejem Carbit / EasyConn
 (např. Vmoto Stash). Pi se tváří jako aplikace v telefonu, připojí se k displeji přes Wi-Fi Direct a posílá
