@@ -1,0 +1,6 @@
+#!/bin/sh
+# Wi-Fi Pi: země US kvůli kanálu 149 (displej vysílá na 5745 MHz; firmware Broadcom ho pro EU zakazuje),
+# výkon omezen na 13 dBm (~20 mW, pod limitem 25 mW pro pásmo 5725–5875 MHz v EU).
+/usr/sbin/iw reg set US
+sleep 2
+/usr/sbin/iw dev wlan0 set txpower fixed 1300

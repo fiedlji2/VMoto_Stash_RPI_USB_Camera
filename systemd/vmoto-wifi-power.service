@@ -1,0 +1,13 @@
+[Unit]
+Description=Vmoto/Carbit: Wi-Fi regdom US (kanál 149) + výkon 13 dBm
+After=NetworkManager.service sys-subsystem-net-devices-wlan0.device
+Wants=sys-subsystem-net-devices-wlan0.device
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/opt/vmoto-carbit-cam/config/vmoto-wifi-power
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

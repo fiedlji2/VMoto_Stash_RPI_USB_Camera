@@ -1,0 +1,8 @@
+/var/log/vmoto-auto.log {
+    weekly
+    rotate 4
+    size 20M
+    compress
+    missingok
+    copytruncate
+}

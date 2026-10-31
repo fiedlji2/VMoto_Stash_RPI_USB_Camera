@@ -1,0 +1,15 @@
+[Unit]
+Description=Vmoto/Carbit: automaticky najít displej a pustit na něj kameru
+After=NetworkManager.service vmoto-wifi-power.service
+Wants=vmoto-wifi-power.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bash /opt/vmoto-carbit-cam/vmoto-auto.sh
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/vmoto-auto.log
+StandardError=append:/var/log/vmoto-auto.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+# data z běhu a osobní nastavení
+logs/
+captures/
+*.pcap
+*.h264
+camera.conf
+view.json
+DISABLE
+__pycache__/
+*.pyc

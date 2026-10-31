@@ -1,0 +1,8 @@
+# Displej (Wi-Fi Direct): jen adresa, žádná výchozí cesta ani DNS - internet jde přes ethernet.
+# Instaluje se do /etc/dhcp/dhclient-enter-hooks.d/vmoto-p2p
+case "$interface" in
+  p2p-*)
+    unset new_routers
+    make_resolv_conf() { :; }
+    ;;
+esac
